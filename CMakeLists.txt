@@ -47,13 +47,15 @@ if(ITCHSTREAM_WERROR)
 endif()
 
 # --- core library ----------------------------------------------------------
-add_library(itchstream_core
+set(ITCHSTREAM_CORE_SOURCES
     src/decoder.cpp
     src/feed.cpp
     src/machine.cpp
     src/messages.cpp
     src/stats.cpp
 )
+
+add_library(itchstream_core STATIC ${ITCHSTREAM_CORE_SOURCES})
 
 target_include_directories(itchstream_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -113,10 +115,30 @@ if(ITCHSTREAM_TESTS)
         if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             message(FATAL_ERROR "ITCHSTREAM_FUZZER requires Clang")
         endif()
+
+        # The library itself has to be instrumented, or libFuzzer only sees the
+        # few branches in the harness and never learns to walk a message stream.
+        # That means a second copy of the core with coverage and sanitizers:
+        # the plain one is linked into binaries that do not link those runtimes.
+        add_library(itchstream_fuzz_core STATIC ${ITCHSTREAM_CORE_SOURCES})
+        target_include_directories(itchstream_fuzz_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_definitions(itchstream_fuzz_core PUBLIC
+            ITCHSTREAM_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+            ITCHSTREAM_CXX_FLAGS="${ITCHSTREAM_REPORTED_FLAGS}"
+        )
+        target_compile_options(itchstream_fuzz_core PRIVATE
+            -fsanitize=fuzzer-no-link,address,undefined
+            -fno-omit-frame-pointer -g
+        )
+
         add_executable(itchstream_fuzz tests/fuzz_decoder.cpp)
-        target_link_libraries(itchstream_fuzz PRIVATE itchstream_core)
-        target_compile_options(itchstream_fuzz PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
-        target_link_options(itchstream_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_libraries(itchstream_fuzz PRIVATE itchstream_fuzz_core)
+        target_compile_options(itchstream_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g
+        )
+        target_link_options(itchstream_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined
+        )
     endif()
 endif()
 
