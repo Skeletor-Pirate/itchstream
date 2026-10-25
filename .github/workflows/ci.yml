@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # Correctness gate: every push builds Debug with ASan + UBSan and runs the
+  # whole suite. A parser that reads past the end of a mapping must fail here,
+  # not in a benchmark.
+  sanitizers:
+    name: ${{ matrix.compiler }} - Debug + ASan/UBSan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang++
+            c_compiler: clang
+          - compiler: g++
+            c_compiler: gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DITCHSTREAM_SANITIZE=ON
+          -DITCHSTREAM_WERROR=ON
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test under sanitizers
+        run: ctest --test-dir build --output-on-failure
+
+  # Release gate: benchmarks stay local, but the Release binary still has to
+  # build, pass the suite, and produce identical output twice on the same file.
+  release:
+    name: g++ - Release + determinism
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DITCHSTREAM_WERROR=ON
+          -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Generate a synthetic file
+        run: ./tools/gen_synthetic.py -o synthetic.itch --messages 200000
+
+      - name: Stats smoke test
+        run: ./build/itchstream stats synthetic.itch --repeat 3 --no-machine
+
+      - name: FR-11 determinism - same file in, identical counts out
+        run: |
+          ./build/itchstream stats synthetic.itch --repeat 1 --json > first.json
+          ./build/itchstream stats synthetic.itch --repeat 1 --json > second.json
+          python3 - <<'PY'
+          import json
+          first = json.load(open("first.json"))
+          second = json.load(open("second.json"))
+          # Wall time differs by design; everything derived from the bytes must not.
+          for key in ("bytes", "messages", "decoded", "skipped", "by_type",
+                      "first_timestamp_ns", "last_timestamp_ns", "walk_ok"):
+              assert first[key] == second[key], f"{key} differed: {first[key]} != {second[key]}"
+          print("determinism ok:", first["messages"], "messages")
+          PY
+
+  # Fuzz gate: libFuzzer under ASan for a fixed time, plus the always-built
+  # deterministic driver, which logs the seed and the iteration it is on.
+  fuzz:
+    name: clang - libFuzzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DITCHSTREAM_FUZZER=ON
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER=clang
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Seed the corpus with valid messages
+        run: ./tools/gen_synthetic.py -o seed.itch --messages 200 --quiet
+
+      - name: Fuzz for 90 seconds
+        run: >
+          ./build/itchstream_fuzz seed.itch
+          -max_total_time=90
+          -print_final_stats=1
+          -rss_limit_mb=4096
+          -artifact_prefix=./
+
+      - name: Upload any crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  windows:
+    name: windows - MSVC Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
