@@ -80,6 +80,10 @@ Input: a 314,572,770-byte message-aligned slice of
 | decode all ten types | 152.278 ms | 65.06 M msg/s, 2065.8 MB/s |
 | walk lengths only (`--length-only`) | 77.873 ms | 127.23 M msg/s, 4039.6 MB/s |
 
+Across three separate 10-run sessions the decode median landed between 147 and
+160 ms (62-67 M msg/s) and length-only between 74 and 78 ms (127-134 M msg/s).
+That band is the result; the extra digits are just the last run.
+
 Machine and build, printed by the binary alongside the numbers:
 
 ```
@@ -96,11 +100,11 @@ how it was produced):
   with min, max, and spread.
 * The file is copied onto the Linux filesystem first; measuring across the
   Windows 9p mount measures the mount.
-* Reported spread on this run: 10.7% decode, 21.1% length-only. That is a
-  laptop under WSL2, not a benchmark rig. Treat the rate as "tens of millions
-  of messages per second" and the comparison between the two rows as the real
-  signal: length-only is 2x decode, so the walk is bounded by message dispatch
-  and memory traffic, not by field extraction.
+* Reported spread inside a single session: 10.7% decode, 21.1% length-only. That
+  is a laptop under WSL2, not a benchmark rig — compare the two rows, not the
+  third digit of either.
+* Length-only runs about twice as fast as decode, so the walk is bounded by
+  message dispatch and memory traffic rather than by field extraction.
 * Sanitizer builds are not benchmarked. They are the CI correctness gate and
   they are several times slower by construction.
 
@@ -126,7 +130,7 @@ against reality rather than against itself:
 | P | Trade | 9,399 | 413,556 |
 | H | *skipped* Stock Trading Action | 8,851 | 221,275 |
 | I | *skipped* NOII | 748,090 | 37,404,500 |
-| L | *skipped* MPID Prior Day | 210,669 | 5,477,394 |
+| L | *skipped* Market Participant Position | 210,669 | 5,477,394 |
 | V | *skipped* MWCB Decline Level | 1 | 35 |
 | Y | *skipped* Reg SHO Restriction | 8,849 | 176,980 |
 
@@ -199,7 +203,7 @@ src/                  decoder, feed, stats, machine/build description, CLI
 tests/                decode + feed/framing tests, seeded fuzz driver, libFuzzer target
 tools/                gen_synthetic.py, make_slice.py
 scripts/              bench.sh, make_slice.sh, machine_info.sh
-data/                 README only; real data is never committed
+data/                 README and the 7 KB synthetic seed; real data is never committed
 ```
 
 ## License
