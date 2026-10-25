@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+# Market data is bytes, not text.
+*.itch binary
+*.gz binary
+*.zip binary
+
+# Git's own
+.gitattributes text

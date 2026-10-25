@@ -1,0 +1,37 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Market data: never committed. See data/README.md.
+data/*.itch
+data/*.gz
+data/*.zip
+data/*.csv
+!data/README.md
+# The one committed data file: 7 KB, seed 7, all ten decoded types present.
+!data/synthetic_seed.itch
+
+# Local benchmark logs: regenerate with scripts/bench.sh
+bench/
+
+# Fuzz artefacts and traces
+itchstream_fuzz_trace.bin
+crash-*
+leak-*
+timeout-*
+oom-*
+corpus/
+synthetic.itch
+first.json
+second.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
