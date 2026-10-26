@@ -47,6 +47,12 @@ struct StatsOptions {
 // HH:MM:SS.nnnnnnnnn from nanoseconds since midnight.
 [[nodiscard]] std::string format_timestamp(std::uint64_t ns_since_midnight);
 
+// Same, written into a caller-supplied buffer and returned as a length. The
+// dump path formats one line per message and must not allocate to do it.
+// Needs 19 bytes; returns 0 when the buffer is too small.
+[[nodiscard]] std::size_t format_timestamp(std::uint64_t ns_since_midnight, char* out,
+                                           std::size_t capacity) noexcept;
+
 // 1234567 -> "1,234,567"
 [[nodiscard]] std::string format_count(std::uint64_t value);
 

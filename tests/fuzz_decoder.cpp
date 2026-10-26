@@ -1,4 +1,4 @@
-// libFuzzer target for the decoder and the message walker.
+// libFuzzer target for the decoder, the message walker and the dump filter.
 //
 // Built only with Clang (-DITCHSTREAM_FUZZER=ON). Run it under ASan + UBSan:
 //
@@ -11,9 +11,27 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "itchstream/decoder.hpp"
+#include "itchstream/dump.hpp"
 #include "itchstream/feed.hpp"
+
+namespace {
+
+// Counts bytes and keeps nothing: the dump path must not depend on a real file.
+class CountingSink final : public itchstream::DumpSink {
+public:
+    [[nodiscard]] bool write(const void* data, std::size_t size) override {
+        (void)data;
+        written += size;
+        return true;
+    }
+
+    std::size_t written = 0;
+};
+
+}  // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
     if (size == 0) return 0;
@@ -40,6 +58,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     const auto type = itchstream::to_msg_type(data[0]);
     const auto length = static_cast<std::uint16_t>(std::min<std::size_t>(size - 1, 0xFFFF));
     (void)itchstream::decode_payload(type, bytes + 1, length);
+
+    // Path 3: the dump filter, in both output formats. The symbol is taken from
+    // the input so the fuzzer can steer it towards a match instead of only
+    // exercising the miss path.
+    itchstream::DumpOptions dump_options;
+    dump_options.symbol.assign(reinterpret_cast<const char*>(data),
+                               std::min<std::size_t>(size, 8));
+    dump_options.text = (size % 2) == 0;
+    CountingSink sink;
+    (void)itchstream::dump_symbol(bytes, size, dump_options, sink);
 
     return 0;
 }

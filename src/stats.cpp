@@ -47,18 +47,30 @@ Stats collect(const std::byte* data, std::size_t size, const StatsOptions& optio
     return stats;
 }
 
-std::string format_timestamp(std::uint64_t ns_since_midnight) {
+std::size_t format_timestamp(std::uint64_t ns_since_midnight, char* out,
+                             std::size_t capacity) noexcept {
+    if (capacity < 19) return 0;
+
     const std::uint64_t total_seconds = ns_since_midnight / 1'000'000'000ULL;
     const std::uint64_t nanos = ns_since_midnight % 1'000'000'000ULL;
     const std::uint64_t hours = total_seconds / 3600;
     const std::uint64_t minutes = (total_seconds / 60) % 60;
     const std::uint64_t seconds = total_seconds % 60;
 
-    char buffer[40];
-    std::snprintf(buffer, sizeof buffer, "%02llu:%02llu:%02llu.%09llu",
-                  static_cast<unsigned long long>(hours), static_cast<unsigned long long>(minutes),
-                  static_cast<unsigned long long>(seconds), static_cast<unsigned long long>(nanos));
-    return std::string(buffer);
+    const int written = std::snprintf(out, capacity, "%02llu:%02llu:%02llu.%09llu",
+                                      static_cast<unsigned long long>(hours),
+                                      static_cast<unsigned long long>(minutes),
+                                      static_cast<unsigned long long>(seconds),
+                                      static_cast<unsigned long long>(nanos));
+    if (written < 0) return 0;
+    const auto length = static_cast<std::size_t>(written);
+    return length < capacity ? length : 0;
+}
+
+std::string format_timestamp(std::uint64_t ns_since_midnight) {
+    char buffer[32];
+    const std::size_t length = format_timestamp(ns_since_midnight, buffer, sizeof buffer);
+    return std::string(buffer, length);
 }
 
 std::string format_count(std::uint64_t value) {

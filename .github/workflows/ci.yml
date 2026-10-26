@@ -66,6 +66,21 @@ jobs:
       - name: Stats smoke test
         run: ./build/itchstream stats synthetic.itch --repeat 3 --no-machine
 
+      - name: Dump one symbol and re-parse the dump
+        run: |
+          ./build/itchstream dump synthetic.itch --symbol SPY --out spy.itch --no-machine
+          ./build/itchstream dump synthetic.itch --symbol SPY --out spy.txt --format text --no-machine --quiet
+          grep -q 'symbol=SPY' spy.txt
+          ./build/itchstream stats spy.itch --json --no-machine --repeat 1 > dumped.json
+          python3 - <<'PY'
+          import json
+          dumped = json.load(open("dumped.json"))
+          assert dumped["walk_ok"], dumped
+          assert dumped["messages"] > 0, "SPY missing from the synthetic file"
+          assert dumped["decode_failures"] == 0, dumped
+          print("dump ok:", dumped["messages"], "messages for SPY")
+          PY
+
       - name: FR-11 determinism - same file in, identical counts out
         run: |
           ./build/itchstream stats synthetic.itch --repeat 1 --json > first.json

@@ -49,6 +49,7 @@ endif()
 # --- core library ----------------------------------------------------------
 set(ITCHSTREAM_CORE_SOURCES
     src/decoder.cpp
+    src/dump.cpp
     src/feed.cpp
     src/machine.cpp
     src/messages.cpp
@@ -99,6 +100,7 @@ if(ITCHSTREAM_TESTS)
 
     add_executable(itchstream_tests
         tests/test_decode.cpp
+        tests/test_dump.cpp
         tests/test_feed.cpp
     )
     target_link_libraries(itchstream_tests PRIVATE itchstream_core Catch2::Catch2WithMain)
