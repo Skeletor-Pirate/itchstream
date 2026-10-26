@@ -57,7 +57,7 @@ table before it exits. Numbers measured on synthetic data are labelled
 synthetic: the file is structurally faithful, the message mix is not real.
 
 `data/synthetic_seed.itch` is committed and is the only data file in git: 201
-messages, 7,264 bytes, seed 7, containing all ten decoded types plus one skipped
-type. Regenerate it byte-for-byte with:
+messages, 7,234 bytes, seed 7, containing all ten decoded types plus four
+skipped `H` messages. Regenerate it byte-for-byte with:
 
     ./tools/gen_synthetic.py -o data/synthetic_seed.itch --messages 200 --seed 7

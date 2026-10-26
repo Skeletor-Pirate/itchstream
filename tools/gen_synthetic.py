@@ -210,6 +210,23 @@ class Emitter:
         self.counts[key] = self.counts.get(key, 0) + 1
 
 
+def add_live(orders: list[dict], order: dict) -> None:
+    order["index"] = len(orders)
+    orders.append(order)
+
+
+def remove_live(orders: list[dict], order: dict) -> None:
+    # Swap-remove instead of list.remove(): the linear scan is invisible at the
+    # 200-message seed and quadratic at a million messages, where it turned a
+    # five-second generation into a multi-minute one. Moving the last order into
+    # the hole keeps every stored index correct.
+    index = order["index"]
+    last = orders.pop()
+    if last is not order:
+        orders[index] = last
+        last["index"] = index
+
+
 def generate(out, messages: int, seed: int) -> dict:
     rng = random.Random(seed)
     emitter = Emitter(out)
@@ -232,15 +249,24 @@ def generate(out, messages: int, seed: int) -> dict:
         next_ref += 1
         return ref
 
+    def take_tracking() -> int:
+        # ITCH tracking numbers are 16 bits and wrap. A generator that keeps
+        # counting past 65535 asks the wire to hold a value it cannot — which
+        # is what the 200,000-message CI file found, after the 200-message seed
+        # had been passing for weeks.
+        nonlocal tracking
+        tracking = (tracking + 1) & 0xFFFF
+        return tracking
+
     emitter.emit(system_event(0, 0, stamp(), "O"))
     for symbol in SYMBOLS:
-        tracking += 1
+        tracking = take_tracking()
         emitter.emit(stock_directory(locate[symbol], tracking, stamp(), symbol))
 
     while emitter.messages < messages:
         symbol = rng.choice(SYMBOLS)
         loc = locate[symbol]
-        tracking += 1
+        tracking = take_tracking()
         roll = rng.random()
         orders = live[symbol]
 
@@ -252,7 +278,7 @@ def generate(out, messages: int, seed: int) -> dict:
             ref = take_ref()
             mpid = "NSDQ" if rng.random() < 0.1 else None
             emitter.emit(add_order(loc, tracking, stamp(), ref, side, shares, symbol, price, mpid))
-            orders.append({"ref": ref, "side": side, "price": price, "shares": shares})
+            add_live(orders, {"ref": ref, "side": side, "price": price, "shares": shares})
 
         elif roll < 0.80:
             order = rng.choice(orders)
@@ -270,7 +296,7 @@ def generate(out, messages: int, seed: int) -> dict:
                 )
             order["shares"] -= executed
             if order["shares"] == 0:
-                orders.remove(order)
+                remove_live(orders, order)
 
         elif roll < 0.88:
             order = rng.choice(orders)
@@ -278,12 +304,12 @@ def generate(out, messages: int, seed: int) -> dict:
             emitter.emit(order_cancel(loc, tracking, stamp(), order["ref"], cancelled))
             order["shares"] -= cancelled
             if order["shares"] == 0:
-                orders.remove(order)
+                remove_live(orders, order)
 
         elif roll < 0.94:
             order = rng.choice(orders)
             emitter.emit(order_delete(loc, tracking, stamp(), order["ref"]))
-            orders.remove(order)
+            remove_live(orders, order)
 
         elif roll < 0.98:
             order = rng.choice(orders)
@@ -291,8 +317,8 @@ def generate(out, messages: int, seed: int) -> dict:
             shares = 100 * rng.randrange(1, 20)
             price = order["price"] + (TICK if order["side"] == "B" else -TICK)
             emitter.emit(order_replace(loc, tracking, stamp(), order["ref"], new_ref, shares, price))
-            orders.remove(order)
-            orders.append({"ref": new_ref, "side": order["side"], "price": price, "shares": shares})
+            remove_live(orders, order)
+            add_live(orders, {"ref": new_ref, "side": order["side"], "price": price, "shares": shares})
 
         else:
             order = rng.choice(orders)
@@ -306,7 +332,7 @@ def generate(out, messages: int, seed: int) -> dict:
         # One percent noise: a type this version skips, so the walker's
         # skip-by-length path is exercised by every generated file.
         if rng.random() < 0.01:
-            tracking += 1
+            tracking = take_tracking()
             emitter.emit(operational_halt(loc, tracking, stamp(), symbol, "T"))
 
     emitter.emit(system_event(0, 0, stamp(), "C"))
