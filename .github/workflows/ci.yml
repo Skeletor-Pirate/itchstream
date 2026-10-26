@@ -2,9 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
+
+# The workflow only reads the repository; artifacts are uploaded by the fuzz job
+# on failure and need no other scope.
+permissions:
+  contents: read
+
+# A superseded push does not need to finish: the newest commit is the one whose
+# result matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Correctness gate: every push builds Debug with ASan + UBSan and runs the
@@ -22,7 +33,7 @@ jobs:
           - compiler: g++
             c_compiler: gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: >
@@ -45,7 +56,7 @@ jobs:
     name: g++ - Release + determinism
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: >
@@ -132,7 +143,7 @@ jobs:
     name: clang - libFuzzer
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: >
@@ -171,7 +182,7 @@ jobs:
     name: windows - MSVC Release
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
