@@ -1,5 +1,9 @@
 # ItchStream
 
+[![CI](https://github.com/Skeletor-Pirate/itchstream/actions/workflows/ci.yml/badge.svg)](https://github.com/Skeletor-Pirate/itchstream/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
+
 A C++20 reader for NASDAQ TotalView-ITCH 5.0 files. It memory-maps a day of
 messages, walks the 2-byte length framing, decodes the ten message types that
 carry order-book information, and reports what it found. It can write one
@@ -10,6 +14,17 @@ per message.
 This is a parser and a measurement harness, not a trading system. There is no
 live feed, no strategy, no GUI, no full-market book, and no Windows-specific
 tuning. Real ITCH data never enters git; see [`data/README.md`](data/README.md).
+
+Contents: [Status](#status) · [Build and run](#build-and-run) ·
+[Use as a library](#use-as-a-library) · [Dump one symbol](#dump-one-symbol) ·
+[Replay a stream](#replay-a-stream) · [Measured throughput](#measured-throughput) ·
+[What M0 found in the real data](#what-m0-found-in-the-real-data) ·
+[Where the requirements are proven](#where-the-requirements-are-proven) ·
+[Design decisions](#design-decisions) · [Layout](#layout) · [License](#license)
+
+Architecture notes live in [`docs/architecture.md`](docs/architecture.md), the
+history in [`CHANGELOG.md`](CHANGELOG.md), and the build/test/fuzz/bench rules in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Status
 
@@ -72,6 +87,47 @@ Exit codes are part of the contract: `0` ok, `1` cannot open a file, `2` malform
 data, `3` bad usage, `4` not implemented yet, `5` message count differed between
 runs of the same file, `6` symbol not found in the file, `7` cannot write the
 output.
+
+## Use as a library
+
+The CLI is a thin shell around `itchstream_core`, a static library with public
+headers. Another program can walk a file without going through `main`:
+
+```cpp
+#include <cstdio>
+#include <itchstream/decoder.hpp>
+#include <itchstream/feed.hpp>
+
+int main(int argc, char** argv) {
+    if (argc != 2) return 3;
+
+    itchstream::MappedFile file;
+    std::string error;
+    if (!file.open(argv[1], error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+    }
+
+    const itchstream::WalkResult result = itchstream::walk(
+        file.data(), file.size(), [](const itchstream::RawMessage& message) {
+            const auto payload =
+                itchstream::decode_payload(message.type, message.payload, message.length);
+            if (payload) {
+                if (const auto* trade = std::get_if<itchstream::Trade>(&*payload)) {
+                    std::printf("trade %u @ %u\n", trade->shares, trade->price);
+                }
+            }
+            return itchstream::WalkAction::Continue;
+        });
+
+    return result.ok() ? 0 : 2;  // describe(result) has the offset and the reason
+}
+```
+
+Link `itchstream_core` and use `include/` from the target's public include
+directory (`target_link_libraries(app PRIVATE itchstream_core)` is enough with
+`add_subdirectory` or `FetchContent`). `RawMessage` is a view into the mapping:
+it is valid only for the duration of the callback.
 
 ## Dump one symbol
 
@@ -349,8 +405,12 @@ tests/                decode + feed/framing + dump + replay tests, seeded fuzz
                       driver, libFuzzer target
 tools/                gen_synthetic.py, make_slice.py
 scripts/              bench.sh, make_slice.sh, machine_info.sh
+docs/                 architecture.md
 data/                 README and the 7 KB synthetic seed; real data is never committed
 ```
+
+`CHANGELOG.md` records what each milestone added and how it was verified;
+`CONTRIBUTING.md` has the build, test, fuzz and benchmark commands.
 
 ## License
 
