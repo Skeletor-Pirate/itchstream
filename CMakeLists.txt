@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ItchStream VERSION 0.1.0 LANGUAGES CXX)
+project(ItchStream VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,9 +69,17 @@ set(ITCHSTREAM_REPORTED_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${ITCHSTREAM
 string(STRIP "${ITCHSTREAM_REPORTED_FLAGS}" ITCHSTREAM_REPORTED_FLAGS)
 
 target_compile_definitions(itchstream_core PUBLIC
+    ITCHSTREAM_VERSION="${PROJECT_VERSION}"
     ITCHSTREAM_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
-    ITCHSTREAM_CXX_FLAGS="${ITCHSTREAM_REPORTED_FLAGS}"
 )
+
+# MSVC's flag string contains spaces and its own quoting; reporting it is not
+# worth a command-line quoting risk, and no Windows number is ever published.
+if(NOT MSVC)
+    target_compile_definitions(itchstream_core PUBLIC
+        ITCHSTREAM_CXX_FLAGS="${ITCHSTREAM_REPORTED_FLAGS}"
+    )
+endif()
 
 if(MSVC)
     target_compile_options(itchstream_core PRIVATE /W4 /permissive-)
@@ -128,6 +136,7 @@ if(ITCHSTREAM_TESTS)
         add_library(itchstream_fuzz_core STATIC ${ITCHSTREAM_CORE_SOURCES})
         target_include_directories(itchstream_fuzz_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_compile_definitions(itchstream_fuzz_core PUBLIC
+            ITCHSTREAM_VERSION="${PROJECT_VERSION}"
             ITCHSTREAM_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
             ITCHSTREAM_CXX_FLAGS="${ITCHSTREAM_REPORTED_FLAGS}"
         )

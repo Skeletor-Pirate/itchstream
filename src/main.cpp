@@ -24,7 +24,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.3.0-m3";
+constexpr const char* kVersion = ITCHSTREAM_VERSION;
 
 // Exit codes are part of the contract: scripts and CI branch on them.
 constexpr int kExitOk = 0;

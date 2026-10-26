@@ -126,7 +126,7 @@ std::string build_summary() {
     out += "unknown build type";
 #endif
 
-#if defined(__OPTIMIZE__)
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && defined(NDEBUG))
     out += " | optimised";
 #else
     out += " | unoptimised (-O0)";
