@@ -2,9 +2,10 @@
 
 A C++20 reader for NASDAQ TotalView-ITCH 5.0 files. It memory-maps a day of
 messages, walks the 2-byte length framing, decodes the ten message types that
-carry order-book information, and reports what it found. It can also write one
-symbol's messages back out as a valid ITCH file or as text. Single pass, single
-thread, no allocation per message.
+carry order-book information, and reports what it found. It can write one
+symbol's messages back out as a valid ITCH file or as text, and re-emit a stream
+at the feed's own pace, byte for byte. Single pass, single thread, no allocation
+per message.
 
 This is a parser and a measurement harness, not a trading system. There is no
 live feed, no strategy, no GUI, no full-market book, and no Windows-specific
@@ -17,7 +18,7 @@ tuning. Real ITCH data never enters git; see [`data/README.md`](data/README.md).
 | **M0** | Repo scaffold, mmap feed walker, decoder with `static_assert`ed wire sizes, `stats` mode, synthetic seed file | **done** |
 | **M1** | Requirement pass (FR-1..FR-4), first parse benchmark with machine details published | **done** |
 | **M2** | `dump` — one symbol's complete stream as a valid ITCH file, or as text | **done** |
-| M3 | `replay` — paced re-emission with timestamps | planned |
+| **M3** | `replay` — re-emit a stream at the feed's own pace, with `--speed`, `--limit`, `--symbol` | **done** |
 
 Decoded types: `S` System Event, `R` Stock Directory, `A` Add Order, `F` Add
 Order with MPID attribution, `E` Order Executed, `C` Order Executed with Price,
@@ -115,6 +116,73 @@ Text output looks like this (skipped types included, marked with their length):
 
 `dump` also takes `--json` for a machine-readable summary.
 
+## Replay a stream
+
+```bash
+# The whole file at 10x the exchange's pace, straight into a consumer.
+./build/itchstream replay data/slice_20190730.itch --speed 10 | ./consumer
+
+# One symbol's six-hour day compressed into six seconds, to a file.
+./build/itchstream replay data/slice_20190730.itch --symbol AAPL \
+    --speed 3600 --out data/aapl_3600x.itch
+
+# The first 10,000 messages, written out as fast as the walk can write them.
+./build/itchstream replay data/slice_20190730.itch --limit 10000 --speed 100000 \
+    > /dev/null
+```
+
+`replay` writes raw ITCH bytes: the same rebuilt length prefix and verbatim body
+that `dump` produces, through the same `write_framed` call. So the stream
+re-parses, and its bytes are the input's bytes. `--speed F` (default `1`) sets
+the pace against the exchange timestamps, `--limit N` stops after N messages,
+and `--symbol SYM` applies the same filter as `dump` — `replay --symbol` and
+`dump` are two names for identical output.
+
+Pacing is absolute, not incremental. Each message's deadline is
+
+```
+wall_start + (timestamp - first_timestamp) / speed
+```
+
+so a late wake-up costs that one message and nothing after it, instead of the
+permanent drift that `sleep(gap since the last message)` accumulates.
+`steady_clock` drives the pace; the exchange timestamp is data, not a clock.
+Messages too short to carry a timestamp inherit the previous pace, and a
+timestamp that goes backwards is clamped rather than wrapping into a
+centuries-long deadline.
+
+When the stream goes to stdout, the report goes to **stderr**, so
+`itchstream replay x.itch | consumer` is a clean stream. With `--out FILE` the
+report goes to stdout as it does for `stats` and `dump`, which means
+`replay x.itch --symbol AAPL --speed 10 --out aapl.itch --json > aapl.json`
+produces the stream and its summary in one pass. Bytes are flushed when a
+message actually waited: a paced stream reaches its consumer on time, while a
+fast replay is not syscall-bound.
+
+On Windows, redirect with `cmd` or use `--out`: PowerShell's `>` re-encodes
+native stdout, which corrupts any binary stream regardless of which program
+wrote it. `--out` naming the input file is refused with exit `3` — the input is
+mapped for the whole run, and truncating it under the walker is not a mistake
+worth surviving.
+
+Measured on the 314 MB slice:
+
+* `replay --speed 1000000 --out` of the whole file is byte-identical to the
+  source: `cmp` clean over 314,572,770 bytes, 9,907,683 messages, 3.4 s wall
+  (the walk and the write, not the clock).
+* `replay --symbol AAPL` and `dump --symbol AAPL` both produce 293,281-byte
+  files, and `cmp` says they are the same file.
+* The first 200 messages of the slice span 270.0575 s of exchange time. At 1x
+  the run took 270.0576 s: 0.13 ms late after four and a half minutes.
+* The AAPL stream spans 22,923 s of exchange time. At 100,000x it aims at
+  229.234 ms of wall time and lands 0.01 ms to 0.07 ms late over 9,120 messages,
+  so the error does not grow with the message count.
+
+Accuracy is bounded by the platform's sleep granularity — tens of microseconds
+under WSL2, not the nanosecond resolution of the timestamps. These are
+`steady_clock` measurements on the machine published under
+[Measured throughput](#measured-throughput).
+
 ## Measured throughput
 
 Input: a 314,572,770-byte message-aligned slice of
@@ -201,18 +269,21 @@ imbalance feed) and `L`.
 | FR-2 decode the ten types, wire sizes match the spec | per-type field tests in `test_decode.cpp`, `static_assert` per struct |
 | FR-3 timestamp at the same offset for every type | one test over all ten decoded types |
 | FR-4 per-type counts, message totals, skipped messages | `test_feed.cpp` `[FR-4]`, `stats.cpp` |
-| FR-5 one symbol's complete stream, byte-exact and replayable | `test_dump.cpp`, `dump.cpp` |
-| FR-10 malformed input fails cleanly, never UB | malformed matrix plus a loop over *every* prefix of a valid stream |
-| FR-11 same file in, identical counts out | unit test, `--repeat` agreement check in `bench.sh`, CI determinism job |
+| FR-5 one symbol's complete stream, byte-exact and replayable | `test_dump.cpp` and `test_replay.cpp`, `dump.cpp`, `symbol_filter.cpp` |
+| FR-10 malformed input fails cleanly, never UB | malformed matrix plus a loop over *every* prefix of a valid stream; `replay` stops at the break instead of writing past it |
+| FR-11 same file in, identical counts out | unit test, `--repeat` agreement check in `bench.sh`, CI determinism job; replay emits the same bytes at 1x and 1000x |
+| M3 paced re-emission | `test_replay.cpp`: byte identity, `--limit`, `--symbol`, 1x vs 50x timing, backwards timestamps, sink and truncation failures |
 
-`ctest` runs 43 test cases / 1,947 assertions plus a seeded fuzz driver (20,000
+`ctest` runs 54 test cases / 2,021 assertions plus a seeded fuzz driver (20,000
 mutations from a logged seed). Both are clean under ASan + UBSan in Debug.
 
 The libFuzzer target instruments the library itself, not just the harness, so
-coverage actually follows the walker, the decoders and the dump filter. A
-60-second local run (Clang 18, ASan + UBSan, seeded with
+coverage actually follows the walker, the decoders, the dump filter and the
+byte-exact writer. A 60-second local run (Clang 18, ASan + UBSan, seeded with
 `data/synthetic_seed.itch`) executed 2.18 million inputs over 360 edges, added
-1,585 corpus entries, peaked at 530 MB of RSS, and found no crash.
+1,585 corpus entries, peaked at 530 MB of RSS, and found no crash. Replay's
+pacing is not a fuzz target: random timestamps would fuzz the clock, and its
+filter and write path are the ones `dump` already covers.
 
 ## Design decisions
 
@@ -244,7 +315,22 @@ and rebuilds only the length prefix, so timestamps, prices and unknown message
 types survive exactly; text output formats into a fixed stack buffer, so the
 dump path allocates nothing per message either. The filter compares the locate
 at its wire offset instead of decoding, which is what lets skipped types travel
-with the symbol.
+with the symbol. `replay` writes through the same `write_framed`, so "dump" and
+"replay" cannot disagree about what a message's bytes are.
+
+**Pacing is absolute.** A replayer that sleeps for the gap since the last
+message accumulates every wake-up it was late by; after ten million messages
+that is a stream running minutes behind its own timestamps. Computing each
+deadline from the first timestamp makes lateness local to one message. The pace
+comes from `steady_clock`, never from the exchange timestamp, and a non-monotonic
+timestamp is clamped instead of being allowed to wrap an unsigned subtraction
+into a deadline decades away.
+
+**The stream owns stdout.** When `replay` writes the stream to stdout, the
+report moves to stderr. A summary line interleaved with a binary stream is a
+corrupted stream, and `replay | consumer` is the main way this command is meant
+to be used. Flushing only after a message that actually waited keeps a paced
+stream on time without turning a fast replay into one syscall per message.
 
 **The fuzz seed is logged.** The deterministic driver writes `(seed, iteration)`
 to a trace file before each mutation and is always built, so a crash replays
@@ -255,9 +341,12 @@ the "log the seed" gap that the previous project left open.
 
 ```
 include/itchstream/   messages.hpp (wire sizes, structs), endian.hpp,
-                      decoder.hpp, feed.hpp (MappedFile, walk), stats.hpp, dump.hpp
-src/                  decoder, feed, stats, dump, machine/build description, CLI
-tests/                decode + feed/framing + dump tests, seeded fuzz driver, libFuzzer target
+                      decoder.hpp, feed.hpp (MappedFile, walk), stats.hpp,
+                      dump.hpp, replay.hpp, symbol_filter.hpp, sink.hpp
+src/                  decoder, feed, stats, dump, replay, symbol filter,
+                      machine/build description, CLI
+tests/                decode + feed/framing + dump + replay tests, seeded fuzz
+                      driver, libFuzzer target
 tools/                gen_synthetic.py, make_slice.py
 scripts/              bench.sh, make_slice.sh, machine_info.sh
 data/                 README and the 7 KB synthetic seed; real data is never committed
