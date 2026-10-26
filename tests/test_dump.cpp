@@ -13,11 +13,18 @@
 
 #include "itchstream/dump.hpp"
 #include "itchstream/feed.hpp"
+#include "itchstream/symbol_filter.hpp"
 #include "test_bytes.hpp"
 
 using namespace itchstream;
+using itchstream_test::add_order;
 using itchstream_test::Bytes;
+using itchstream_test::executed;
 using itchstream_test::frame;
+using itchstream_test::noii;
+using itchstream_test::stock_directory;
+using itchstream_test::trade;
+using itchstream_test::trading_action;
 
 namespace {
 
@@ -25,7 +32,7 @@ namespace {
 constexpr std::uint64_t kTs = 34'200'000'021'223;
 constexpr std::uint64_t kTsPlus1ms = kTs + 1'000'000;
 
-class StringSink final : public DumpSink {
+class StringSink final : public MessageSink {
 public:
     [[nodiscard]] bool write(const void* data, std::size_t size) override {
         if (writes_ >= limit) return false;
@@ -58,81 +65,6 @@ Dumped dump(const Bytes& stream, std::string_view symbol, bool text = false) {
         out.bytes = sink.bytes;
     }
     return out;
-}
-
-Bytes stock_directory(std::uint64_t ts, std::uint16_t locate, std::string_view symbol) {
-    return Bytes{}
-        .u8('R')
-        .u16(locate)
-        .u16(0)
-        .ts(ts)
-        .chars(symbol, 8)
-        .ch('Q')
-        .ch('N')
-        .u32(100)
-        .ch('N')
-        .ch('C')
-        .chars("  ", 2)
-        .ch('P')
-        .ch('N')
-        .ch('N')
-        .ch('1')
-        .ch('N')
-        .u32(0)
-        .ch('N');
-}
-
-Bytes add_order(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, char side,
-                std::uint32_t shares, std::string_view symbol, std::uint32_t price) {
-    return Bytes{}
-        .u8('A')
-        .u16(locate)
-        .u16(0)
-        .ts(ts)
-        .u64(ref)
-        .ch(side)
-        .u32(shares)
-        .chars(symbol, 8)
-        .u32(price);
-}
-
-Bytes executed(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, std::uint32_t shares,
-               std::uint64_t match) {
-    return Bytes{}.u8('E').u16(locate).u16(0).ts(ts).u64(ref).u32(shares).u64(match);
-}
-
-Bytes trade(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, char side,
-            std::uint32_t shares, std::string_view symbol, std::uint32_t price,
-            std::uint64_t match) {
-    return Bytes{}
-        .u8('P')
-        .u16(locate)
-        .u16(0)
-        .ts(ts)
-        .u64(ref)
-        .ch(side)
-        .u32(shares)
-        .chars(symbol, 8)
-        .u32(price)
-        .u64(match);
-}
-
-// Not decoded by this version: dump must still copy it, because the output is
-// the symbol's full stream and the locate is at the same offset in every type.
-Bytes noii(std::uint64_t ts, std::uint16_t locate) {
-    return Bytes{}.u8('I').u16(locate).u16(0).ts(ts).zeros(50 - 11);
-}
-
-Bytes trading_action(std::uint64_t ts, std::uint16_t locate, std::string_view symbol) {
-    return Bytes{}
-        .u8('H')
-        .u16(locate)
-        .u16(0)
-        .ts(ts)
-        .chars(symbol, 8)
-        .ch('T')
-        .ch(' ')
-        .chars("    ", 4);
 }
 
 }  // namespace

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +13,9 @@
 
 #include "itchstream/dump.hpp"
 #include "itchstream/feed.hpp"
+#include "itchstream/replay.hpp"
 #include "itchstream/stats.hpp"
+#include "itchstream/symbol_filter.hpp"
 
 #if defined(_WIN32)
 #include <fcntl.h>
@@ -21,7 +24,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0-m2";
+constexpr const char* kVersion = "0.3.0-m3";
 
 // Exit codes are part of the contract: scripts and CI branch on them.
 constexpr int kExitOk = 0;
@@ -37,7 +40,7 @@ const char* kUsage =
     "usage:\n"
     "  itchstream stats <file> [options]\n"
     "  itchstream dump <file> --symbol SYM --out FILE [--format itch|text]\n"
-    "  itchstream replay <file> [options]                 (M3, not implemented)\n"
+    "  itchstream replay <file> [options]\n"
     "  itchstream --help | --version\n"
     "\n"
     "stats options:\n"
@@ -54,6 +57,16 @@ const char* kUsage =
     "  --format text  one human-readable line per message\n"
     "  --json         machine-readable summary\n"
     "\n"
+    "replay options:\n"
+    "  --speed F      emit F times faster than the feed's own pace (default 1.0)\n"
+    "  --limit N      emit at most N messages, then stop\n"
+    "  --symbol SYM   re-emit only this symbol (same filter as dump)\n"
+    "  --out FILE     write to FILE instead of stdout (raw ITCH bytes either way)\n"
+    "  --json         machine-readable summary\n"
+    "\n"
+    "replay writes the feed to stdout by default and prints its report to stderr,\n"
+    "so \"itchstream replay x.itch | consumer\" is a clean stream.\n"
+    "\n"
     "exit codes: 0 ok, 1 cannot open a file, 2 malformed data, 3 bad usage,\n"
     "            4 not implemented yet, 5 message count differed between runs,\n"
     "            6 symbol not found in the file, 7 cannot write the output\n";
@@ -64,6 +77,8 @@ struct Options {
     std::string symbol;
     std::string output;
     std::uint64_t repeat = 1;
+    std::uint64_t limit = 0;
+    double speed = 1.0;
     bool decode = true;
     bool json = false;
     bool quiet = false;
@@ -72,6 +87,8 @@ struct Options {
     bool repeat_given = false;
     bool length_only_given = false;
     bool format_given = false;
+    bool speed_given = false;
+    bool limit_given = false;
 };
 
 void print_usage(std::ostream& out) {
@@ -95,7 +112,9 @@ double median_of(std::vector<double> values) {
 // A 10 KB file finishes in microseconds; "0.0000 s" reads like a bug.
 std::string format_seconds(double seconds) {
     char buffer[40];
-    if (seconds < 1e-3) {
+    if (seconds < 1e-6) {
+        std::snprintf(buffer, sizeof buffer, "%.0f ns", seconds * 1e9);
+    } else if (seconds < 1e-3) {
         std::snprintf(buffer, sizeof buffer, "%.1f us", seconds * 1e6);
     } else if (seconds < 1.0) {
         std::snprintf(buffer, sizeof buffer, "%.3f ms", seconds * 1e3);
@@ -318,7 +337,7 @@ int run_stats(const Options& options) {
     return kExitOk;
 }
 
-class FileSink final : public itchstream::DumpSink {
+class FileSink final : public itchstream::MessageSink {
 public:
     explicit FileSink(std::FILE* file) noexcept : file_(file) {}
 
@@ -331,12 +350,39 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool flush() override {
+        if (std::fflush(file_) != 0) {
+            error_ = errno;
+            return false;
+        }
+        return true;
+    }
+
     [[nodiscard]] int error() const noexcept { return error_; }
 
 private:
     std::FILE* file_;
     int error_ = 0;
 };
+
+// Binary mode on every platform, for both formats: text mode would rewrite
+// every '\n' as "\r\n" and corrupt a binary stream, and it would make the same
+// output differ between Windows and Linux.
+void use_binary_mode(std::FILE* file) noexcept {
+#if defined(_WIN32)
+    ::_setmode(::_fileno(file), _O_BINARY);
+#else
+    (void)file;
+#endif
+}
+
+// The input is mapped for the whole run, so opening it as the output would
+// truncate the mapping under the walker. Comparing the two spellings catches
+// the mistake a person actually makes; it is not a claim to catch every path
+// that resolves to the same file.
+bool output_is_input(const itchstream::MappedFile& file, const std::string& output) {
+    return !output.empty() && output == file.path();
+}
 
 void print_dump_table(const itchstream::DumpResult& result) {
     std::printf("\ntype  %-30s %14s\n", "message", "count");
@@ -395,18 +441,18 @@ int run_dump(const Options& options) {
         return kExitOpenFailed;
     }
 
+    if (output_is_input(file, options.output)) {
+        std::cerr << "itchstream: --out is the input file; refusing to overwrite it\n";
+        return kExitUsage;
+    }
+
     std::FILE* out = std::fopen(options.output.c_str(), "wb");
     if (out == nullptr) {
         std::cerr << "itchstream: cannot write '" << options.output
                   << "': " << std::strerror(errno) << "\n";
         return kExitWriteFailed;
     }
-#if defined(_WIN32)
-    // One mode for both formats: text mode would rewrite every '\n' as "\r\n"
-    // and corrupt a binary dump, and it would make the same dump differ between
-    // platforms. Both formats write exactly their bytes.
-    ::_setmode(::_fileno(out), _O_BINARY);
-#endif
+    use_binary_mode(out);
     FileSink sink(out);
 
     const std::string symbol = itchstream::normalize_symbol(options.symbol);
@@ -477,6 +523,152 @@ int run_dump(const Options& options) {
     return kExitOk;
 }
 
+void print_replay_json(std::FILE* report, const Options& options, const itchstream::MappedFile& file,
+                       const itchstream::ReplayResult& result, double wall_seconds) {
+    std::fprintf(report,
+                 "{\"input\":\"%s\",\"output\":\"%s\",\"speed\":%g,\"limit\":%llu,"
+                 "\"emitted\":%llu,\"bytes\":%llu,\"scanned\":%llu,",
+                 json_escape(file.path()).c_str(),
+                 options.output.empty() ? "stdout" : json_escape(options.output).c_str(), options.speed,
+                 static_cast<unsigned long long>(options.limit),
+                 static_cast<unsigned long long>(result.emitted),
+                 static_cast<unsigned long long>(result.bytes_written),
+                 static_cast<unsigned long long>(result.walk.messages));
+
+    if (!options.symbol.empty()) {
+        std::fprintf(report, "\"symbol\":\"%s\",", itchstream::normalize_symbol(options.symbol).c_str());
+        if (result.locate.has_value()) {
+            std::fprintf(report, "\"locate\":%u,", static_cast<unsigned>(*result.locate));
+        } else {
+            std::fprintf(report, "\"locate\":null,");
+        }
+        std::fprintf(report, "\"symbol_found\":%s,", result.symbol_found ? "true" : "false");
+    }
+
+    std::fprintf(report,
+                 "\"feed_seconds\":%.6f,\"target_seconds\":%.6f,\"wall_seconds\":%.6f,"
+                 "\"walk_ok\":%s,\"walk_error\":\"%s\"}\n",
+                 result.feed_seconds, result.target_seconds, wall_seconds,
+                 result.walk.ok() ? "true" : "false", itchstream::to_string(result.walk.error));
+}
+
+// Replay writes the feed to stdout unless --out is given, so the report goes to
+// stderr in that case: a report on stdout would end up inside the stream a
+// consumer is parsing.
+int run_replay(const Options& options) {
+    itchstream::MappedFile file;
+    std::string error;
+    if (!file.open(options.file, error)) {
+        std::cerr << "itchstream: " << error << "\n";
+        return kExitOpenFailed;
+    }
+
+    const bool to_stdout = options.output.empty();
+    if (output_is_input(file, options.output)) {
+        std::cerr << "itchstream: --out is the input file; refusing to overwrite it\n";
+        return kExitUsage;
+    }
+
+    std::FILE* out = stdout;
+    if (!to_stdout) {
+        out = std::fopen(options.output.c_str(), "wb");
+        if (out == nullptr) {
+            std::cerr << "itchstream: cannot write '" << options.output
+                      << "': " << std::strerror(errno) << "\n";
+            return kExitWriteFailed;
+        }
+    }
+    use_binary_mode(out);
+    FileSink sink(out);
+
+    std::FILE* const report = to_stdout ? stderr : stdout;
+
+    if (!options.json && !options.quiet) {
+        std::fprintf(report, "itchstream %s\n", kVersion);
+        if (options.machine) {
+            std::fprintf(report, "machine   %s\n", itchstream::machine_summary().c_str());
+            std::fprintf(report, "build     %s\n", itchstream::build_summary().c_str());
+        }
+        std::fprintf(report, "input     %s\n", file.path().c_str());
+        std::fprintf(report, "output    %s\n", to_stdout ? "(stdout)" : options.output.c_str());
+        std::fprintf(report, "speed     %gx\n", options.speed);
+        if (options.limit != 0) std::fprintf(report, "limit     %llu messages\n",
+                                             static_cast<unsigned long long>(options.limit));
+    }
+
+    itchstream::ReplayOptions replay_options;
+    replay_options.speed = options.speed;
+    replay_options.limit = options.limit;
+    if (!options.symbol.empty()) replay_options.symbol = options.symbol;
+
+    const auto start = std::chrono::steady_clock::now();
+    const itchstream::ReplayResult result =
+        itchstream::replay(file.data(), file.size(), replay_options, sink);
+    const auto finish = std::chrono::steady_clock::now();
+    const double wall_seconds = std::chrono::duration<double>(finish - start).count();
+
+    bool output_failed = false;
+    int write_error = sink.error();
+    if (to_stdout) {
+        output_failed = std::fflush(out) != 0;
+        if (output_failed) write_error = errno;
+    } else {
+        output_failed = std::fclose(out) != 0;
+        if (output_failed) write_error = errno;
+    }
+
+    if (options.json) {
+        print_replay_json(report, options, file, result, wall_seconds);
+    } else if (options.quiet) {
+        std::fprintf(report, "%s messages  %s bytes  %s\n",
+                     itchstream::format_count(result.emitted).c_str(),
+                     itchstream::format_count(result.bytes_written).c_str(),
+                     format_seconds(wall_seconds).c_str());
+    } else {
+        if (!options.symbol.empty()) {
+            std::fprintf(report, "symbol    %s%s\n", itchstream::normalize_symbol(options.symbol).c_str(),
+                         result.symbol_found ? "" : " (not found in this file)");
+            if (result.locate.has_value()) {
+                std::fprintf(report, "locate    %u\n", static_cast<unsigned>(*result.locate));
+            }
+        }
+        std::fprintf(report, "scanned   %s messages\n",
+                     itchstream::format_count(result.walk.messages).c_str());
+        std::fprintf(report, "emitted   %s messages, %s bytes\n",
+                     itchstream::format_count(result.emitted).c_str(),
+                     itchstream::format_count(result.bytes_written).c_str());
+        if (result.have_timestamp) {
+            const double drift_ms = (wall_seconds - result.target_seconds) * 1e3;
+            std::fprintf(report, "pacing    feed %s at %gx -> target %s, wall %s (drift %+.2f ms)\n",
+                         format_seconds(result.feed_seconds).c_str(), options.speed,
+                         format_seconds(result.target_seconds).c_str(), format_seconds(wall_seconds).c_str(),
+                         drift_ms);
+        } else {
+            std::fprintf(report, "pacing    no timestamps in the emitted messages; ran unpaced\n");
+        }
+        std::fprintf(report, "wall      %s\n", format_seconds(wall_seconds).c_str());
+    }
+
+    if (result.write_failed || output_failed) {
+        const int code = write_error != 0 ? write_error : 0;
+        std::fprintf(stderr, "itchstream: writing the stream failed: %s\n",
+                     code != 0 ? std::strerror(code)
+                               : (result.error.empty() ? "unknown error" : result.error.c_str()));
+        return kExitWriteFailed;
+    }
+    if (!result.walk.ok()) {
+        std::fprintf(stderr, "itchstream: %s\n", itchstream::describe(result.walk).c_str());
+        std::fprintf(stderr, "itchstream: the replayed stream is incomplete\n");
+        return kExitBadData;
+    }
+    if (!options.symbol.empty() && !result.symbol_found) {
+        std::fprintf(stderr, "itchstream: symbol '%s' does not appear in %s\n",
+                     itchstream::normalize_symbol(options.symbol).c_str(), file.path().c_str());
+        return kExitNoSymbol;
+    }
+    return kExitOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -539,6 +731,27 @@ int main(int argc, char** argv) {
                 return usage_error("--format must be 'itch' or 'text', not '" + std::string(format) + "'");
             }
             options.format_given = true;
+        } else if (arg == "--speed") {
+            if (i + 1 >= argc) return usage_error("--speed needs a value");
+            const std::string value = argv[++i];
+            try {
+                options.speed = std::stod(value);
+            } catch (const std::exception&) {
+                return usage_error("--speed needs a number, not '" + value + "'");
+            }
+            if (!(options.speed > 0.0) || !std::isfinite(options.speed)) {
+                return usage_error("--speed must be greater than zero");
+            }
+            options.speed_given = true;
+        } else if (arg == "--limit") {
+            if (i + 1 >= argc) return usage_error("--limit needs a value");
+            try {
+                options.limit = std::stoull(argv[++i]);
+            } catch (const std::exception&) {
+                return usage_error("--limit needs a whole number");
+            }
+            if (options.limit == 0) return usage_error("--limit must be at least 1");
+            options.limit_given = true;
         } else if (!arg.empty() && arg.front() == '-') {
             return usage_error("unknown option '" + std::string(arg) + "'");
         } else if (options.file.empty()) {
@@ -553,15 +766,19 @@ int main(int argc, char** argv) {
     }
 
     if (options.command == "stats") {
-        if (!options.symbol.empty()) return usage_error("--symbol is a dump option");
-        if (!options.output.empty()) return usage_error("--out is a dump option");
+        if (!options.symbol.empty()) return usage_error("--symbol is a dump or replay option");
+        if (!options.output.empty()) return usage_error("--out is a dump or replay option");
         if (options.format_given) return usage_error("--format is a dump option");
+        if (options.speed_given) return usage_error("--speed is a replay option");
+        if (options.limit_given) return usage_error("--limit is a replay option");
         return run_stats(options);
     }
 
     if (options.command == "dump") {
         if (options.repeat_given) return usage_error("--repeat is a stats option");
         if (options.length_only_given) return usage_error("--length-only is a stats option");
+        if (options.speed_given) return usage_error("--speed is a replay option");
+        if (options.limit_given) return usage_error("--limit is a replay option");
         if (options.symbol.empty()) return usage_error("dump needs --symbol SYM");
         if (!itchstream::is_valid_symbol(options.symbol)) {
             return usage_error("'" + options.symbol +
@@ -571,7 +788,18 @@ int main(int argc, char** argv) {
         return run_dump(options);
     }
 
+    if (options.command == "replay") {
+        if (options.repeat_given) return usage_error("--repeat is a stats option");
+        if (options.length_only_given) return usage_error("--length-only is a stats option");
+        if (options.format_given) return usage_error("--format is a dump option");
+        if (!options.symbol.empty() && !itchstream::is_valid_symbol(options.symbol)) {
+            return usage_error("'" + options.symbol +
+                               "' is not a symbol: 1-8 characters of letters, digits, '.', '-' or '$'");
+        }
+        return run_replay(options);
+    }
+
     std::cerr << "itchstream: '" << options.command
-              << "' is not implemented yet; this build is M2 (decoder + stats + dump)\n";
+              << "' is not implemented yet; this build is M3 (decoder + stats + dump + replay)\n";
     return kExitNotImplemented;
 }

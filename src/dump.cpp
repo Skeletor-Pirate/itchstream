@@ -7,46 +7,10 @@
 
 #include "itchstream/decoder.hpp"
 #include "itchstream/stats.hpp"
+#include "itchstream/symbol_filter.hpp"
 
 namespace itchstream {
 namespace {
-
-// Wire offsets, built from the wire widths rather than offsetof(): the structs
-// hold the 6-byte timestamp in a uint64_t, so every field after it sits two
-// bytes later in memory than on the wire.
-constexpr std::size_t kLocateOffset = 1;  // every ITCH 5.0 message
-constexpr std::size_t kSymbolOffsetDirectory = 1 + 2 + 2 + kTimestampWireBytes;  // 11
-constexpr std::size_t kSymbolOffsetOrder = kSymbolOffsetDirectory + 8 + 1 + 4;   // 24
-
-static_assert(kSymbolOffsetDirectory + 8 <= StockDirectory::kWireSize);
-static_assert(kSymbolOffsetOrder + 8 <= AddOrder::kWireSize);
-static_assert(kSymbolOffsetOrder + 8 <= AddOrderMpid::kWireSize);
-static_assert(kSymbolOffsetOrder + 8 <= Trade::kWireSize);
-
-// Text field as the exchange pads it: spaces and NULs on the right are padding,
-// not part of the value. The returned view points into the mapping, not a copy.
-std::string_view trim_field(const char* data, std::size_t size) noexcept {
-    while (size > 0 && (data[size - 1] == ' ' || data[size - 1] == '\0')) --size;
-    return std::string_view(data, size);
-}
-
-// The symbol, for the four types that carry one; empty for every other type.
-std::string_view embedded_symbol(const RawMessage& message) noexcept {
-    std::size_t offset = 0;
-    switch (message.type) {
-        case MsgType::StockDirectory:
-            offset = kSymbolOffsetDirectory;
-            break;
-        case MsgType::AddOrder:
-        case MsgType::AddOrderMpid:
-        case MsgType::Trade:
-            offset = kSymbolOffsetOrder;
-            break;
-        default:
-            return {};
-    }
-    return trim_field(reinterpret_cast<const char*>(message.payload + offset), 8);
-}
 
 // One text line, formatted in place. Fixed capacity: the widest line is about
 // 120 bytes, and a line that did not fit fails the dump rather than being
@@ -128,7 +92,7 @@ void render(const AddOrder& message, TextLine& line) noexcept {
 
 void render(const AddOrderMpid& message, TextLine& line) noexcept {
     const std::string_view symbol = symbol_view(message.stock);
-    const std::string_view attribution = trim_field(message.attribution.data(), message.attribution.size());
+    const std::string_view attribution = trim_padding(message.attribution.data(), message.attribution.size());
     line.append(" ref=%llu", static_cast<unsigned long long>(message.order_reference_number));
     append_side(line, message.buy_sell_indicator);
     line.append(" shares=%u", message.shares);
@@ -190,11 +154,11 @@ void append_prefix(const RawMessage& message, TextLine& line) noexcept {
     }
 
     const std::string_view type = printable_type(message.type);
-    const std::uint16_t locate = load_be16(message.payload + kLocateOffset);
+    const std::uint16_t locate = load_be16(message.payload + kLocateWireOffset);
     line.append("  %.*s %5u", static_cast<int>(type.size()), type.data(), locate);
 }
 
-bool write_message(const RawMessage& message, bool text, DumpSink& sink, DumpResult& result) {
+bool write_message(const RawMessage& message, bool text, MessageSink& sink, DumpResult& result) {
     if (text) {
         TextLine line;
         append_prefix(message, line);
@@ -226,13 +190,11 @@ bool write_message(const RawMessage& message, bool text, DumpSink& sink, DumpRes
     } else {
         // The length prefix is rebuilt from the validated length and the payload
         // is copied verbatim, so the output is the input's exact message bytes.
-        const std::byte header[2] = {std::byte{static_cast<std::uint8_t>(message.length >> 8)},
-                                     std::byte{static_cast<std::uint8_t>(message.length & 0xFF)}};
-        if (!sink.write(header, sizeof header) || !sink.write(message.payload, message.length)) {
+        if (!write_framed(sink, message)) {
             result.error = "the output rejected a write";
             return false;
         }
-        result.bytes_written += sizeof header + message.length;
+        result.bytes_written += 2 + message.length;
     }
 
     ++result.messages;
@@ -242,52 +204,13 @@ bool write_message(const RawMessage& message, bool text, DumpSink& sink, DumpRes
 
 }  // namespace
 
-bool is_valid_symbol(std::string_view symbol) noexcept {
-    if (symbol.empty() || symbol.size() > 8) return false;
-    for (const char raw : symbol) {
-        const auto c = static_cast<unsigned char>(raw);
-        const bool letter = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-        const bool digit = c >= '0' && c <= '9';
-        const bool punctuation = c == '.' || c == '-' || c == '$';
-        if (!letter && !digit && !punctuation) return false;
-    }
-    return true;
-}
-
-std::string normalize_symbol(std::string_view symbol) {
-    std::string out(symbol);
-    for (char& c : out) {
-        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-    }
-    return out;
-}
-
 DumpResult dump_symbol(const std::byte* data, std::size_t size, const DumpOptions& options,
-                       DumpSink& sink) {
+                       MessageSink& sink) {
     DumpResult result{};
-    const std::string target = normalize_symbol(options.symbol);
-    std::optional<std::uint16_t> locate;
+    SymbolFilter filter(options.symbol);
 
     result.walk = walk(data, size, [&](const RawMessage& message) {
-        // Every ITCH 5.0 message has the locate at offset 1, but the walker
-        // admits an unknown type with a 1-byte body. Nothing to match there.
-        if (message.length < kLocateOffset + 2) return WalkAction::Continue;
-
-        const std::uint16_t message_locate = load_be16(message.payload + kLocateOffset);
-        bool matched = false;
-
-        // Symbol compare first: it also works before the directory entry has
-        // been seen, for the four types that carry the symbol themselves.
-        if (const std::string_view symbol = embedded_symbol(message); !symbol.empty()) {
-            if (symbol == target) {
-                result.symbol_found = true;
-                if (!locate.has_value()) locate = message_locate;
-                matched = true;
-            }
-        }
-
-        if (!matched && locate.has_value() && message_locate == *locate) matched = true;
-        if (!matched) return WalkAction::Continue;
+        if (!filter.matches(message)) return WalkAction::Continue;
 
         if (!write_message(message, options.text, sink, result)) {
             result.write_failed = true;
@@ -296,7 +219,8 @@ DumpResult dump_symbol(const std::byte* data, std::size_t size, const DumpOption
         return WalkAction::Continue;
     });
 
-    result.locate = locate;
+    result.locate = filter.locate();
+    result.symbol_found = filter.found();
     return result;
 }
 

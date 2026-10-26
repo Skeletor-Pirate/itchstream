@@ -53,7 +53,9 @@ set(ITCHSTREAM_CORE_SOURCES
     src/feed.cpp
     src/machine.cpp
     src/messages.cpp
+    src/replay.cpp
     src/stats.cpp
+    src/symbol_filter.cpp
 )
 
 add_library(itchstream_core STATIC ${ITCHSTREAM_CORE_SOURCES})
@@ -102,6 +104,7 @@ if(ITCHSTREAM_TESTS)
         tests/test_decode.cpp
         tests/test_dump.cpp
         tests/test_feed.cpp
+        tests/test_replay.cpp
     )
     target_link_libraries(itchstream_tests PRIVATE itchstream_core Catch2::Catch2WithMain)
     add_test(NAME itchstream_tests COMMAND itchstream_tests)

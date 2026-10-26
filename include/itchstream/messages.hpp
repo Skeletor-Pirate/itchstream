@@ -292,6 +292,13 @@ inline constexpr std::size_t kDecodedTypeCount = sizeof(kTypeTable) / sizeof(kTy
 // control bytes would wreck a terminal table, so they become '?' or '\xNN'.
 [[nodiscard]] std::string_view printable_type(MsgType type) noexcept;
 
+// A fixed-width text field as the exchange pads it: trailing spaces and NULs
+// are padding, not part of the value. The view points at the caller's bytes.
+[[nodiscard]] inline std::string_view trim_padding(const char* data, std::size_t size) noexcept {
+    while (size > 0 && (data[size - 1] == ' ' || data[size - 1] == '\0')) --size;
+    return std::string_view(data, size);
+}
+
 // Symbols are 8 bytes, right-padded with spaces.
 [[nodiscard]] std::string_view symbol_view(const std::array<char, 8>& stock) noexcept;
 

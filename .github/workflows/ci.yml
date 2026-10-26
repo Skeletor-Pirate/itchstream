@@ -81,6 +81,36 @@ jobs:
           print("dump ok:", dumped["messages"], "messages for SPY")
           PY
 
+      - name: Replay - byte-exact, symbol agreement with dump, limit
+        run: |
+          # Whole file, out and back: the bytes must survive the trip.
+          ./build/itchstream replay synthetic.itch --speed 100000 --out replayed.itch --no-machine --quiet
+          cmp synthetic.itch replayed.itch
+
+          # replay --symbol and dump --symbol are two names for one stream.
+          ./build/itchstream replay synthetic.itch --symbol SPY --speed 100000 --out replay_spy.itch --no-machine --quiet
+          cmp spy.itch replay_spy.itch
+
+          # --limit emits exactly that many messages.
+          ./build/itchstream replay synthetic.itch --limit 100 --speed 1000 --out replayed_100.itch --json --no-machine > replay.json
+          python3 - <<'PY'
+          import json
+          replay = json.load(open("replay.json"))
+          assert replay["walk_ok"], replay
+          assert replay["emitted"] == 100, replay["emitted"]
+          assert replay["scanned"] == 100, replay["scanned"]
+          assert replay["bytes"] > 0, replay
+          print("replay ok:", replay["emitted"], "messages,", replay["bytes"], "bytes")
+          PY
+
+          # --out pointing at the input is refused: the input is mapped while
+          # the output is written. The file must survive the attempt.
+          set +e
+          ./build/itchstream replay synthetic.itch --out synthetic.itch
+          test $? -eq 3
+          set -e
+          ./build/itchstream stats synthetic.itch --quiet --no-machine
+
       - name: FR-11 determinism - same file in, identical counts out
         run: |
           ./build/itchstream stats synthetic.itch --repeat 1 --json > first.json

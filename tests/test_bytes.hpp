@@ -90,4 +90,83 @@ inline std::array<char, 8> sym8(std::string_view text) {
     return out;
 }
 
+// Ready-made message bodies, identical in shape to the specification table so a
+// test that reads like the document builds the bytes the document describes.
+// Shared by the dump and replay tests rather than copied into both.
+
+inline Bytes stock_directory(std::uint64_t ts, std::uint16_t locate, std::string_view symbol) {
+    return Bytes{}
+        .u8('R')
+        .u16(locate)
+        .u16(0)
+        .ts(ts)
+        .chars(symbol, 8)
+        .ch('Q')
+        .ch('N')
+        .u32(100)
+        .ch('N')
+        .ch('C')
+        .chars("  ", 2)
+        .ch('P')
+        .ch('N')
+        .ch('N')
+        .ch('1')
+        .ch('N')
+        .u32(0)
+        .ch('N');
+}
+
+inline Bytes add_order(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, char side,
+                       std::uint32_t shares, std::string_view symbol, std::uint32_t price) {
+    return Bytes{}
+        .u8('A')
+        .u16(locate)
+        .u16(0)
+        .ts(ts)
+        .u64(ref)
+        .ch(side)
+        .u32(shares)
+        .chars(symbol, 8)
+        .u32(price);
+}
+
+inline Bytes executed(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, std::uint32_t shares,
+                      std::uint64_t match) {
+    return Bytes{}.u8('E').u16(locate).u16(0).ts(ts).u64(ref).u32(shares).u64(match);
+}
+
+inline Bytes trade(std::uint64_t ts, std::uint16_t locate, std::uint64_t ref, char side,
+                   std::uint32_t shares, std::string_view symbol, std::uint32_t price,
+                   std::uint64_t match) {
+    return Bytes{}
+        .u8('P')
+        .u16(locate)
+        .u16(0)
+        .ts(ts)
+        .u64(ref)
+        .ch(side)
+        .u32(shares)
+        .chars(symbol, 8)
+        .u32(price)
+        .u64(match);
+}
+
+// Not decoded by this version: dump and replay must still carry it, because the
+// locate is at the same offset in every type.
+inline Bytes noii(std::uint64_t ts, std::uint16_t locate) {
+    return Bytes{}.u8('I').u16(locate).u16(0).ts(ts).zeros(50 - 11);
+}
+
+inline Bytes trading_action(std::uint64_t ts, std::uint16_t locate, std::string_view symbol) {
+    return Bytes{}
+        .u8('H')
+        .u16(locate)
+        .u16(0)
+        .ts(ts)
+        .chars(symbol, 8)
+        .ch('T')
+        .ch(' ')
+        .chars("    ", 4);
+}
+
 }  // namespace itchstream_test

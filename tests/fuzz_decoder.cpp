@@ -20,7 +20,7 @@
 namespace {
 
 // Counts bytes and keeps nothing: the dump path must not depend on a real file.
-class CountingSink final : public itchstream::DumpSink {
+class CountingSink final : public itchstream::MessageSink {
 public:
     [[nodiscard]] bool write(const void* data, std::size_t size) override {
         (void)data;
